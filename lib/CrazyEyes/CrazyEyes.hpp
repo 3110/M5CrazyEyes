@@ -4,7 +4,7 @@
 
 class CrazyEyes {
 public:
-    static constexpr const char* VERSION = "v0.0.1";
+    static constexpr const char* VERSION = "v0.0.2";
 
     CrazyEyes(void);
     virtual ~CrazyEyes(void) = default;
