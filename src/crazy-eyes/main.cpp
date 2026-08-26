@@ -251,5 +251,11 @@ void setup(void) {
 
 void loop(void) {
     eyes.update();
+
+    if (M5.BtnA.wasClicked()) {
+        Serial.printf("Battery gauge: %s\n",
+                      eyes.toggleBatteryGauge() ? "on" : "off");
+    }
+
     updateEye(millis());
 }
