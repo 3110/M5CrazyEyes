@@ -215,7 +215,9 @@ void updateChord(const uint32_t now) {
     // トグル直後の押下が高速まばたきにならないようにします。
     key1.firstTapArmed = false;
     key2.firstTapArmed = false;
-    Serial.printf("Random blink: %s\n", randomBlinkEnabled ? "on" : "off");
+    if (Serial) {
+        Serial.printf("Random blink: %s\n", randomBlinkEnabled ? "on" : "off");
+    }
 }
 
 // 応答パターンは，キーを離して開くコマンドを送り終えてから再生します。
@@ -293,8 +295,10 @@ void setup(void) {
     esp_log_level_set("*", static_cast<esp_log_level_t>(LOG_LOCAL_LEVEL));
 
     M5.begin();
-    pinMode(KEY1_PIN, INPUT);
-    pinMode(KEY2_PIN, INPUT);
+    // キーはプルアップします。USBを抜くとGPIO0の外部回路が外れるため，
+    // プルアップなしでは押下の検出が不安定になります。
+    pinMode(KEY1_PIN, INPUT_PULLUP);
+    pinMode(KEY2_PIN, INPUT_PULLUP);
 
     espnowReady = espnow.begin(ESP_NOW_CHANNEL);
     if (!espnowReady) {
