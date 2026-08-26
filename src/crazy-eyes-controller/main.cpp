@@ -11,6 +11,8 @@ constexpr EyeId KEY2_EYE_ID = EyeId::Right;
 constexpr uint32_t FIRST_TAP_MAX_MS = 250;
 constexpr uint32_t SECOND_PRESS_WINDOW_MS = 300;
 constexpr uint32_t CONTROL_REPEAT_MS = 200;
+constexpr uint32_t OPEN_REPEAT_COUNT = 3;
+constexpr uint32_t OPEN_REPEAT_MS = 50;
 
 struct KeyState {
     m5::Button_Class button;
@@ -19,6 +21,7 @@ struct KeyState {
     uint32_t pressedAt = 0;
     uint32_t firstTapReleasedAt = 0;
     uint32_t lastSentAt = 0;
+    uint8_t openRepeatLeft = 0;
 };
 
 EspNowManager espnow;
@@ -53,6 +56,7 @@ void updateKey(KeyState& state, const EyeId eyeId, const uint32_t now) {
     }
 
     if (state.button.wasPressed()) {
+        state.openRepeatLeft = 0;
         state.pressedAt = now;
         state.fastBlinking =
             state.firstTapArmed &&
@@ -74,6 +78,7 @@ void updateKey(KeyState& state, const EyeId eyeId, const uint32_t now) {
 
     if (state.button.wasReleased()) {
         sendCommand(state, eyeId, EyeCommand::Open, now);
+        state.openRepeatLeft = OPEN_REPEAT_COUNT - 1;
 
         if (!state.fastBlinking && now - state.pressedAt <= FIRST_TAP_MAX_MS) {
             state.firstTapArmed = true;
@@ -82,6 +87,16 @@ void updateKey(KeyState& state, const EyeId eyeId, const uint32_t now) {
             state.firstTapArmed = false;
         }
         state.fastBlinking = false;
+    }
+
+    // 開くコマンドは取りこぼしても目が開くように複数回送信します。
+    if (state.openRepeatLeft > 0) {
+        if (state.button.isPressed()) {
+            state.openRepeatLeft = 0;
+        } else if (now - state.lastSentAt >= OPEN_REPEAT_MS) {
+            --state.openRepeatLeft;
+            sendCommand(state, eyeId, EyeCommand::Open, now);
+        }
     }
 }
 }  // namespace
