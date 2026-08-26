@@ -12,6 +12,24 @@
 
 static constexpr const char* TAG = "CrazyEyes";
 
+// 電池残量は円形ディスプレイの外周に沿ったアークで表示します。
+static constexpr int32_t GAUGE_OUTER_RADIUS = 228;
+static constexpr int32_t GAUGE_INNER_RADIUS = 214;
+static constexpr float GAUGE_START_DEGREE = -90.0F;  // 12時の位置から時計回り
+static constexpr int32_t GAUGE_HIGH_LEVEL = 50;
+static constexpr int32_t GAUGE_LOW_LEVEL = 20;
+// 残量は電圧から求めるため負荷で数%揺れます。刻んで表示のちらつきを抑えます。
+static constexpr int32_t BATTERY_LEVEL_STEP = 5;
+static constexpr uint32_t BATTERY_POLL_MS = 10000;
+static constexpr uint32_t BATTERY_PULSE_MS = 600;
+
+static constexpr uint16_t GAUGE_TRACK_COLOR = m5gfx::color565(48, 48, 48);
+static constexpr uint16_t GAUGE_HIGH_COLOR = m5gfx::color565(0, 208, 96);
+static constexpr uint16_t GAUGE_MIDDLE_COLOR = m5gfx::color565(255, 176, 0);
+static constexpr uint16_t GAUGE_LOW_COLOR = m5gfx::color565(240, 48, 48);
+static constexpr uint16_t GAUGE_CHARGING_COLOR = m5gfx::color565(0, 176, 240);
+static constexpr uint16_t GAUGE_PULSE_COLOR = m5gfx::color565(160, 240, 255);
+
 extern const uint8_t OPEN_EYE_START[] asm(
     "_binary_data_crazy_eyes_open_jpg_start");
 extern const uint8_t OPEN_EYE_END[] asm("_binary_data_crazy_eyes_open_jpg_end");
@@ -23,7 +41,15 @@ extern const uint8_t CLOSE_EYE_END[] asm(
     "_binary_data_crazy_eyes_close_jpg_end");
 static const size_t CLOSE_EYE_SIZE = (CLOSE_EYE_END - CLOSE_EYE_START);
 
-CrazyEyes::CrazyEyes(void) : _is_opened(true), _is_cached(false) {
+CrazyEyes::CrazyEyes(void)
+    : _is_opened(true),
+      _is_cached(false),
+      _shows_battery(false),
+      _is_charging(false),
+      _is_pulse_on(false),
+      _battery_level(-1),
+      _battery_polled_at(0),
+      _pulsed_at(0) {
 }
 
 bool CrazyEyes::begin(const int bgColor) {
@@ -58,7 +84,91 @@ bool CrazyEyes::cacheEye(M5Canvas& canvas, const uint8_t* jpeg,
 
 bool CrazyEyes::update(void) {
     M5.update();
+
+    // 目が静止していても，残量の変化と充電中の点滅を反映します。
+    if (this->_shows_battery && updateBattery(millis())) {
+        M5.Lcd.startWrite();
+        drawBatteryGauge();
+        M5.Lcd.endWrite();
+    }
     return true;
+}
+
+bool CrazyEyes::readBattery(const uint32_t now) {
+    this->_battery_polled_at = now;
+
+    const int32_t level = M5.Power.getBatteryLevel();
+    const int32_t stepped =
+        level < 0 ? -1 : (level / BATTERY_LEVEL_STEP) * BATTERY_LEVEL_STEP;
+    const bool charging =
+        M5.Power.isCharging() == m5::Power_Class::is_charging_t::is_charging;
+    if (stepped == this->_battery_level && charging == this->_is_charging) {
+        return false;
+    }
+
+    this->_battery_level = stepped;
+    this->_is_charging = charging;
+    if (!charging) {
+        this->_is_pulse_on = false;
+    }
+    return true;
+}
+
+bool CrazyEyes::updateBattery(const uint32_t now) {
+    bool changed = false;
+
+    if (now - this->_battery_polled_at >= BATTERY_POLL_MS) {
+        changed = readBattery(now);
+    }
+
+    if (this->_is_charging && now - this->_pulsed_at >= BATTERY_PULSE_MS) {
+        this->_pulsed_at = now;
+        this->_is_pulse_on = !this->_is_pulse_on;
+        changed = true;
+    }
+    return changed;
+}
+
+uint16_t CrazyEyes::batteryGaugeColor(void) const {
+    if (this->_is_charging) {
+        return this->_is_pulse_on ? GAUGE_PULSE_COLOR : GAUGE_CHARGING_COLOR;
+    }
+    if (this->_battery_level > GAUGE_HIGH_LEVEL) {
+        return GAUGE_HIGH_COLOR;
+    }
+    if (this->_battery_level > GAUGE_LOW_LEVEL) {
+        return GAUGE_MIDDLE_COLOR;
+    }
+    return GAUGE_LOW_COLOR;
+}
+
+void CrazyEyes::drawBatteryGauge(void) {
+    const int32_t cx = M5.Display.width() / 2;
+    const int32_t cy = M5.Display.height() / 2;
+
+    M5.Lcd.fillArc(cx, cy, GAUGE_INNER_RADIUS, GAUGE_OUTER_RADIUS,
+                   GAUGE_START_DEGREE, GAUGE_START_DEGREE + 360.0F,
+                   GAUGE_TRACK_COLOR);
+    if (this->_battery_level <= 0) {
+        // 読み取りに失敗したときは目盛りだけを残します。
+        return;
+    }
+
+    M5.Lcd.fillArc(cx, cy, GAUGE_INNER_RADIUS, GAUGE_OUTER_RADIUS,
+                   GAUGE_START_DEGREE,
+                   GAUGE_START_DEGREE + 3.6F * this->_battery_level,
+                   batteryGaugeColor());
+}
+
+bool CrazyEyes::toggleBatteryGauge(void) {
+    this->_shows_battery = !this->_shows_battery;
+    if (this->_shows_battery) {
+        readBattery(millis());
+    }
+
+    // 消すときはキャンバスを描き直してアークを消去します。
+    show();
+    return this->_shows_battery;
 }
 
 void CrazyEyes::drawEye(void) {
@@ -87,6 +197,9 @@ void CrazyEyes::show(void) {
 #endif
     M5.Lcd.startWrite();
     drawEye();
+    if (this->_shows_battery) {
+        drawBatteryGauge();
+    }
     M5.Lcd.endWrite();
 #if CRAZY_EYES_MEASURE_DRAW
     const uint32_t finished_at = micros();

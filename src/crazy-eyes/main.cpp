@@ -1,4 +1,5 @@
 #include <EspNowManager.h>
+#include <M5PM1.h>
 #include <Preferences.h>
 
 #include <freertos/FreeRTOS.h>
@@ -27,11 +28,26 @@ enum class EyeMode : uint8_t {
 
 CrazyEyes eyes;
 EspNowManager espnow;
+M5PM1 pm1;
 EyeId eyeId = EyeId::Left;
 QueueHandle_t commandQueue = nullptr;
 EyeMode eyeMode = EyeMode::Open;
 uint32_t lastControlAt = 0;
 uint32_t lastBlinkAt = 0;
+
+// 本体のステータスLEDを消します。全消灯してから給電を落とさないと，消灯前の
+// 色がデータに残り，次に給電が入った瞬間に一瞬点灯します。
+void turnOffStatusLed(void) {
+    if (pm1.begin(&M5.In_I2C) != M5PM1_OK) {
+        Serial.println("Failed to open M5PM1. Leaving the status LED as is.");
+        return;
+    }
+
+    const m5pm1_rgb_t black[M5PM1_MAX_LED_COUNT] = {};
+    pm1.setLeds(black, M5PM1_MAX_LED_COUNT, M5PM1_MAX_LED_COUNT,
+                /*autoRefresh=*/true);
+    pm1.setLedEnLevel(false);
+}
 
 void printEyeId(const EyeId value) {
     Serial.printf("%c (%s)", static_cast<uint8_t>(value),
@@ -235,6 +251,7 @@ void setup(void) {
     esp_log_level_set("*", static_cast<esp_log_level_t>(LOG_LOCAL_LEVEL));
 
     eyes.begin();
+    turnOffStatusLed();
     if (!loadEyeId()) {
         stopWithError();
     }
@@ -251,5 +268,11 @@ void setup(void) {
 
 void loop(void) {
     eyes.update();
+
+    if (M5.BtnA.wasClicked()) {
+        Serial.printf("Battery gauge: %s\n",
+                      eyes.toggleBatteryGauge() ? "on" : "off");
+    }
+
     updateEye(millis());
 }
