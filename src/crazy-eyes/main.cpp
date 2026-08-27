@@ -40,6 +40,13 @@ constexpr float GAZE_MAX_OFFSET = 40.0F;
 constexpr float GAZE_SPRING = 0.28F;
 constexpr float GAZE_DAMPING = 0.45F;
 constexpr int32_t GAZE_MIN_STEP = 2;
+// 活動が途切れてからこの間隔で一段ずつ眠くなり，最後に目を閉じます。
+constexpr uint32_t SLEEP_STEP_MS = 30000;
+constexpr uint32_t SLEEP_STEP_COUNT = CrazyEyes::OPEN_LEVEL_COUNT;
+// 加速度の緩やかな平均からのずれで動きを見ます。直前のサンプルとの差分だと
+// IMUのノイズをそのまま拾ってしまうためです。
+constexpr float MOTION_FILTER = 0.05F;
+constexpr float MOTION_THRESHOLD = 0.10F;
 
 enum class EyeMode : uint8_t {
     Open,
@@ -68,6 +75,13 @@ uint8_t touchBlinkLeft = 0;
 bool touchBlinkClosed = false;
 uint32_t touchPhaseAt = 0;
 uint32_t touchPhaseMs = 0;
+uint32_t lastActivityAt = 0;
+uint32_t sleepStep = 0;
+const char* lastActivitySource = "boot";
+bool hasMotionReference = false;
+float refAx = 0.0F;
+float refAy = 0.0F;
+float refAz = 0.0F;
 float gazePosition = 0.0F;
 float gazeVelocity = 0.0F;
 int32_t gazeShown = 0;
@@ -234,8 +248,42 @@ bool loadEyeId(void) {
 
 // タッチ中は遠隔側の描画を止めます。状態の更新とタイムアウトの判定は続ける
 // ため，指を離したときに正しい状態へ戻せます。
+// 何か起きたら，一段ずつ戻すのではなく即座に見開きます。
+void markActivity(const uint32_t now, const char* source) {
+    lastActivityAt = now;
+    lastActivitySource = source;
+    if (sleepStep == 0) {
+        return;
+    }
+
+    const bool wasAsleep = sleepStep >= SLEEP_STEP_COUNT;
+    sleepStep = 0;
+    eyes.setOpenLevel(0);
+    if (wasAsleep) {
+        eyes.setOpened(true);
+    }
+}
+
+// 動きもタッチも受信もない状態が続くと，だんだん目が落ちていきます。
+void updateSleep(const uint32_t now) {
+    uint32_t step = (now - lastActivityAt) / SLEEP_STEP_MS;
+    if (step > SLEEP_STEP_COUNT) {
+        step = SLEEP_STEP_COUNT;
+    }
+    if (step == sleepStep) {
+        return;
+    }
+
+    sleepStep = step;
+    if (step >= SLEEP_STEP_COUNT) {
+        eyes.setOpened(false);
+        return;
+    }
+    eyes.setOpenLevel(static_cast<uint8_t>(step));
+}
+
 void applyRemoteEye(const bool opened) {
-    if (touchState == TouchState::Idle) {
+    if (touchState == TouchState::Idle && sleepStep < SLEEP_STEP_COUNT) {
         eyes.setOpened(opened);
     }
 }
@@ -250,8 +298,12 @@ void restoreRemoteEye(const uint32_t now) {
     eyes.setOpened(eyeMode != EyeMode::Closed);
 }
 
-void applyCommand(const EyeCommand command, const uint32_t now) {
-    switch (command) {
+void applyCommand(const uint8_t raw, const uint32_t now) {
+    if (!isAutomaticEyeCommand(raw)) {
+        markActivity(now, "command");
+    }
+
+    switch (toEyeCommand(raw)) {
         case EyeCommand::Open:
             eyeMode = EyeMode::Open;
             applyRemoteEye(true);
@@ -323,6 +375,37 @@ void updateGaze(const uint32_t now) {
         return;
     }
 
+    if (!hasMotionReference) {
+        hasMotionReference = true;
+        refAx = ax;
+        refAy = ay;
+        refAz = az;
+    }
+    const float motion =
+        fabsf(ax - refAx) + fabsf(ay - refAy) + fabsf(az - refAz);
+    refAx += (ax - refAx) * MOTION_FILTER;
+    refAy += (ay - refAy) * MOTION_FILTER;
+    refAz += (az - refAz) * MOTION_FILTER;
+    if (motion > MOTION_THRESHOLD) {
+        markActivity(now, "motion");
+    }
+
+#if CRAZY_EYES_GAZE_DEBUG
+    static uint32_t sleepLoggedAt = 0;
+    static float motionPeak = 0.0F;
+    if (motion > motionPeak) {
+        motionPeak = motion;
+    }
+    if (now - sleepLoggedAt >= 2000) {
+        sleepLoggedAt = now;
+        Serial.printf("sleep: idle=%us step=%u motion=%.3f peak=%.3f by=%s\n",
+                      static_cast<unsigned>((now - lastActivityAt) / 1000),
+                      static_cast<unsigned>(sleepStep), motion, motionPeak,
+                      lastActivitySource);
+        motionPeak = 0.0F;
+    }
+#endif
+
     float tilt = GAZE_DIRECTION * gazeTiltSource(ax, ay, az) / GAZE_TILT_LIMIT;
     tilt = tilt < -1.0F ? -1.0F : (tilt > 1.0F ? 1.0F : tilt);
 
@@ -356,6 +439,7 @@ void updateTouch(const uint32_t now) {
     }
 
     if (M5.Touch.getDetail().isPressed()) {
+        markActivity(now, "touch");
         if (touchState != TouchState::Touching) {
             touchState = TouchState::Touching;
             eyes.setOpened(false);
@@ -378,9 +462,9 @@ void updateTouch(const uint32_t now) {
 }
 
 void updateEye(const uint32_t now) {
-    EyeCommand command;
-    if (xQueueReceive(commandQueue, &command, 0) == pdTRUE) {
-        applyCommand(command, now);
+    uint8_t raw = 0;
+    if (xQueueReceive(commandQueue, &raw, 0) == pdTRUE) {
+        applyCommand(raw, now);
     }
 
     if (eyeMode != EyeMode::Open &&
@@ -409,9 +493,9 @@ void onDataReceived(const uint8_t* addr, const uint8_t* data, int len) {
         return;
     }
 
-    const EyeCommand command = static_cast<EyeCommand>(data[1]);
+    const uint8_t raw = data[1];
     if (commandQueue != nullptr) {
-        xQueueOverwrite(commandQueue, &command);
+        xQueueOverwrite(commandQueue, &raw);
     }
 
     ESP_LOGD("OnDataReceived", "From: %s", macToStr(addr).str);
@@ -434,7 +518,8 @@ void setup(void) {
         stopWithError();
     }
 
-    commandQueue = xQueueCreate(1, sizeof(EyeCommand));
+    lastActivityAt = millis();
+    commandQueue = xQueueCreate(1, sizeof(uint8_t));
     if (commandQueue == nullptr || !espnow.begin(ESP_NOW_CHANNEL) ||
         !espnow.registerCallback(onDataReceived)) {
         Serial.println("Failed to initialize ESP-NOW receiver.");
@@ -447,13 +532,15 @@ void setup(void) {
 void loop(void) {
     eyes.update();
 
+    const uint32_t now = millis();
     if (M5.BtnA.wasClicked()) {
+        markActivity(now, "button");
         Serial.printf("Battery gauge: %s\n",
                       eyes.toggleBatteryGauge() ? "on" : "off");
     }
 
-    const uint32_t now = millis();
     updateGaze(now);
     updateTouch(now);
     updateEye(now);
+    updateSleep(now);
 }
