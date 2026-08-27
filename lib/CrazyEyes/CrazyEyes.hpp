@@ -16,10 +16,12 @@ public:
     virtual bool setOpened(const bool opened);
     virtual bool blink(void);
     virtual bool toggleBatteryGauge(void);
+    virtual bool setGaze(const int32_t offset);
 
 private:
     bool cacheEye(M5Canvas& canvas, const uint8_t* jpeg, const size_t size);
     void drawEye(void);
+    void drawIris(void);
     void drawBatteryGauge(void);
     uint16_t batteryGaugeColor(void) const;
     bool readBattery(const uint32_t now);
@@ -29,6 +31,7 @@ private:
     M5Canvas _opened_eye;
     M5Canvas _closed_eye;
     bool _is_cached;
+    int32_t _gaze;
     bool _shows_battery;
     bool _is_charging;
     bool _is_pulse_on;

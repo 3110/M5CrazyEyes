@@ -12,6 +12,14 @@
 
 static constexpr const char* TAG = "CrazyEyes";
 
+// 虹彩と瞳は画像に含めず，実行時に円で描きます。視線を動かしても白目からは
+// み出さないことを，元のSVGの寸法から確認済みです。
+static constexpr int32_t IRIS_RADIUS = 122;
+static constexpr int32_t PUPIL_RADIUS = 79;
+static constexpr int32_t GAZE_MAX_OFFSET = 40;
+static constexpr uint16_t IRIS_COLOR = m5gfx::color565(0x29, 0xC7, 0xFF);
+static constexpr uint16_t PUPIL_COLOR = m5gfx::color565(0x0D, 0x0D, 0x0D);
+
 // 電池残量は円形ディスプレイの外周に沿ったアークで表示します。
 static constexpr int32_t GAUGE_OUTER_RADIUS = 228;
 static constexpr int32_t GAUGE_INNER_RADIUS = 214;
@@ -49,7 +57,8 @@ CrazyEyes::CrazyEyes(void)
       _is_pulse_on(false),
       _battery_level(-1),
       _battery_polled_at(0),
-      _pulsed_at(0) {
+      _pulsed_at(0),
+      _gaze(0) {
 }
 
 bool CrazyEyes::begin(const int bgColor) {
@@ -171,17 +180,46 @@ bool CrazyEyes::toggleBatteryGauge(void) {
     return this->_shows_battery;
 }
 
+// 白目の中を虹彩が動きます。閉じているときは描きません。
+void CrazyEyes::drawIris(void) {
+    const int32_t cx = M5.Display.width() / 2 + this->_gaze;
+    const int32_t cy = M5.Display.height() / 2;
+
+    M5.Lcd.fillCircle(cx, cy, IRIS_RADIUS, IRIS_COLOR);
+    M5.Lcd.fillCircle(cx, cy, PUPIL_RADIUS, PUPIL_COLOR);
+}
+
+bool CrazyEyes::setGaze(const int32_t offset) {
+    const int32_t clamped =
+        offset < -GAZE_MAX_OFFSET
+            ? -GAZE_MAX_OFFSET
+            : (offset > GAZE_MAX_OFFSET ? GAZE_MAX_OFFSET : offset);
+    if (clamped == this->_gaze) {
+        return false;
+    }
+
+    this->_gaze = clamped;
+    if (this->_is_opened) {
+        show();
+    }
+    return true;
+}
+
 void CrazyEyes::drawEye(void) {
     if (this->_is_cached) {
         M5Canvas& canvas =
             this->_is_opened ? this->_opened_eye : this->_closed_eye;
         canvas.pushSprite(&M5.Lcd, 0, 0);
+        if (this->_is_opened) {
+            drawIris();
+        }
         return;
     }
 
     if (this->_is_opened) {
         M5.Lcd.drawJpg(OPEN_EYE_START, OPEN_EYE_SIZE, 0, 0, M5.Display.width(),
                        M5.Display.height(), 0, 0, 0.0F, 0.0F, middle_center);
+        drawIris();
     } else {
         M5.Lcd.drawJpg(CLOSE_EYE_START, CLOSE_EYE_SIZE, 0, 0,
                        M5.Display.width(), M5.Display.height(), 0, 0, 0.0F,

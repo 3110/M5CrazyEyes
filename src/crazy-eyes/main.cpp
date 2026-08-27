@@ -8,6 +8,12 @@
 #include "CrazyEyes.hpp"
 #include "CrazyEyesProtocol.hpp"
 
+// -DCRAZY_EYES_GAZE_DEBUG=1 を指定すると，加速度と視線量をシリアルへ出力し
+// ます。取り付け方を変えて，傾ける向きと視線の向きを確認するときに使います。
+#ifndef CRAZY_EYES_GAZE_DEBUG
+#define CRAZY_EYES_GAZE_DEBUG 0
+#endif
+
 namespace {
 constexpr char PREFERENCES_NAMESPACE[] = "crazy-eyes";
 constexpr char EYE_ID_NAME[] = "eye_id";
@@ -24,6 +30,16 @@ constexpr uint32_t CONTROL_TIMEOUT_MS = 600;
 constexpr uint8_t TOUCH_BLINK_COUNT = 3;
 constexpr uint32_t TOUCH_BLINK_CLOSE_MS = 80;
 constexpr uint32_t TOUCH_BLINK_OPEN_MS = 80;
+constexpr uint32_t GAZE_UPDATE_MS = 20;
+// 画面の横方向に対応する重力成分がこの値で振り切れます。sin(30度)です。
+constexpr float GAZE_TILT_LIMIT = 0.5F;
+// 傾けた側へ瞳が寄ります。向きが逆なら 1.0F にしてください。
+constexpr float GAZE_DIRECTION = -1.0F;
+constexpr float GAZE_MAX_OFFSET = 40.0F;
+// バネと減衰です。頭を止めたあとに瞳がわずかに揺り戻します。
+constexpr float GAZE_SPRING = 0.28F;
+constexpr float GAZE_DAMPING = 0.45F;
+constexpr int32_t GAZE_MIN_STEP = 2;
 
 enum class EyeMode : uint8_t {
     Open,
@@ -52,6 +68,10 @@ uint8_t touchBlinkLeft = 0;
 bool touchBlinkClosed = false;
 uint32_t touchPhaseAt = 0;
 uint32_t touchPhaseMs = 0;
+float gazePosition = 0.0F;
+float gazeVelocity = 0.0F;
+int32_t gazeShown = 0;
+uint32_t lastGazeAt = 0;
 
 // 本体のステータスLEDを消します。全消灯してから給電を落とさないと，消灯前の
 // 色がデータに残り，次に給電が入った瞬間に一瞬点灯します。
@@ -281,6 +301,55 @@ void updateTouchBlink(const uint32_t now) {
     touchPhaseMs = TOUCH_BLINK_CLOSE_MS;
 }
 
+// 画面の横方向に対応する加速度の軸です。この機体ではX軸が画面の縦方向で，
+// 横方向はY軸でした。取り付け方を変えたときはここを差し替えます。
+inline float gazeTiltSource(const float ax, const float ay, const float az) {
+    return ay;
+}
+
+// 重力の画面横方向成分から，瞳を寄せる量を決めます。目標へバネで追従させる
+// ことで，頭を止めたあとに少し揺り戻し，生き物らしい動きになります。
+void updateGaze(const uint32_t now) {
+    if (!M5.Imu.isEnabled() || now - lastGazeAt < GAZE_UPDATE_MS) {
+        return;
+    }
+    lastGazeAt = now;
+
+    M5.Imu.update();
+    float ax = 0.0F;
+    float ay = 0.0F;
+    float az = 0.0F;
+    if (!M5.Imu.getAccel(&ax, &ay, &az)) {
+        return;
+    }
+
+    float tilt = GAZE_DIRECTION * gazeTiltSource(ax, ay, az) / GAZE_TILT_LIMIT;
+    tilt = tilt < -1.0F ? -1.0F : (tilt > 1.0F ? 1.0F : tilt);
+
+    const float target = tilt * GAZE_MAX_OFFSET;
+    gazeVelocity += (target - gazePosition) * GAZE_SPRING;
+    gazeVelocity *= 1.0F - GAZE_DAMPING;
+    gazePosition += gazeVelocity;
+
+    const int32_t offset = static_cast<int32_t>(lroundf(gazePosition));
+    if (offset > gazeShown - GAZE_MIN_STEP &&
+        offset < gazeShown + GAZE_MIN_STEP) {
+        return;
+    }
+
+    gazeShown = offset;
+    eyes.setGaze(offset);
+
+#if CRAZY_EYES_GAZE_DEBUG
+    static uint32_t loggedAt = 0;
+    if (now - loggedAt >= 500) {
+        loggedAt = now;
+        Serial.printf("accel x=%+.2f y=%+.2f z=%+.2f -> gaze=%+d\n", ax, ay, az,
+                      static_cast<int>(offset));
+    }
+#endif
+}
+
 void updateTouch(const uint32_t now) {
     if (!M5.Touch.isEnabled()) {
         return;
@@ -360,6 +429,7 @@ void setup(void) {
     turnOffStatusLed();
     Serial.printf("Touch panel: %s\n",
                   M5.Touch.isEnabled() ? "enabled" : "disabled");
+    Serial.printf("IMU: %s\n", M5.Imu.isEnabled() ? "enabled" : "disabled");
     if (!loadEyeId()) {
         stopWithError();
     }
@@ -383,6 +453,7 @@ void loop(void) {
     }
 
     const uint32_t now = millis();
+    updateGaze(now);
     updateTouch(now);
     updateEye(now);
 }
