@@ -5,7 +5,7 @@
 class CrazyEyes {
 public:
     static constexpr const char* NAME = "M5CrazyEyes";
-    static constexpr const char* VERSION = "v0.0.2";
+    static constexpr const char* VERSION = "v0.0.3";
 
     // 開いた状態の段階です。0が完全に開いた状態で，数が増えるほど眠そうに
     // なります。閉じた状態はこれとは別に持ちます。
