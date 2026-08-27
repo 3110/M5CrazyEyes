@@ -19,11 +19,22 @@ constexpr uint32_t BUTTON_DEBOUNCE_MS = 20;
 constexpr uint32_t EYE_ID_DISPLAY_MS = 1000;
 constexpr uint32_t FAST_BLINK_INTERVAL_MS = 100;
 constexpr uint32_t CONTROL_TIMEOUT_MS = 600;
+constexpr uint8_t TOUCH_BLINK_COUNT = 3;
+constexpr uint32_t TOUCH_BLINK_CLOSE_MS = 80;
+constexpr uint32_t TOUCH_BLINK_OPEN_MS = 80;
 
 enum class EyeMode : uint8_t {
     Open,
     Closed,
     FastBlink,
+};
+
+// タッチは遠隔の状態とは別のレイヤーです。有効な間は描画をこちらが持ち，
+// 遠隔側は状態の更新だけを続けます。
+enum class TouchState : uint8_t {
+    Idle,
+    Touching,
+    Blinking,
 };
 
 CrazyEyes eyes;
@@ -34,6 +45,11 @@ QueueHandle_t commandQueue = nullptr;
 EyeMode eyeMode = EyeMode::Open;
 uint32_t lastControlAt = 0;
 uint32_t lastBlinkAt = 0;
+TouchState touchState = TouchState::Idle;
+uint8_t touchBlinkLeft = 0;
+bool touchBlinkClosed = false;
+uint32_t touchPhaseAt = 0;
+uint32_t touchPhaseMs = 0;
 
 // 本体のステータスLEDを消します。全消灯してから給電を落とさないと，消灯前の
 // 色がデータに残り，次に給電が入った瞬間に一瞬点灯します。
@@ -185,27 +201,99 @@ bool loadEyeId(void) {
     }
 }
 
+// タッチ中は遠隔側の描画を止めます。状態の更新とタイムアウトの判定は続ける
+// ため，指を離したときに正しい状態へ戻せます。
+void applyRemoteEye(const bool opened) {
+    if (touchState == TouchState::Idle) {
+        eyes.setOpened(opened);
+    }
+}
+
+// タッチの動作が終わったら，その時点の遠隔状態を描き直します。
+void restoreRemoteEye(const uint32_t now) {
+    if (eyeMode == EyeMode::FastBlink) {
+        lastBlinkAt = now;
+        eyes.setOpened(false);
+        return;
+    }
+    eyes.setOpened(eyeMode != EyeMode::Closed);
+}
+
 void applyCommand(const EyeCommand command, const uint32_t now) {
     switch (command) {
         case EyeCommand::Open:
             eyeMode = EyeMode::Open;
-            eyes.setOpened(true);
+            applyRemoteEye(true);
             break;
 
         case EyeCommand::Close:
             eyeMode = EyeMode::Closed;
             lastControlAt = now;
-            eyes.setOpened(false);
+            applyRemoteEye(false);
             break;
 
         case EyeCommand::FastBlink:
             if (eyeMode != EyeMode::FastBlink) {
-                eyes.setOpened(false);
+                applyRemoteEye(false);
                 lastBlinkAt = now;
             }
             eyeMode = EyeMode::FastBlink;
             lastControlAt = now;
             break;
+    }
+}
+
+// 指を離したあとのパチパチです。閉じると開くを交互に繰り返します。
+void updateTouchBlink(const uint32_t now) {
+    if (now - touchPhaseAt < touchPhaseMs) {
+        return;
+    }
+
+    if (touchBlinkClosed) {
+        eyes.setOpened(true);
+        touchBlinkClosed = false;
+        --touchBlinkLeft;
+        touchPhaseAt = now;
+        touchPhaseMs = TOUCH_BLINK_OPEN_MS;
+        return;
+    }
+
+    if (touchBlinkLeft == 0) {
+        touchState = TouchState::Idle;
+        restoreRemoteEye(now);
+        return;
+    }
+
+    eyes.setOpened(false);
+    touchBlinkClosed = true;
+    touchPhaseAt = now;
+    touchPhaseMs = TOUCH_BLINK_CLOSE_MS;
+}
+
+void updateTouch(const uint32_t now) {
+    if (!M5.Touch.isEnabled()) {
+        return;
+    }
+
+    if (M5.Touch.getDetail().isPressed()) {
+        if (touchState != TouchState::Touching) {
+            touchState = TouchState::Touching;
+            eyes.setOpened(false);
+        }
+        return;
+    }
+
+    if (touchState == TouchState::Touching) {
+        touchState = TouchState::Blinking;
+        touchBlinkLeft = TOUCH_BLINK_COUNT;
+        touchBlinkClosed = false;
+        touchPhaseAt = now;
+        touchPhaseMs = 0;
+        return;
+    }
+
+    if (touchState == TouchState::Blinking) {
+        updateTouchBlink(now);
     }
 }
 
@@ -218,7 +306,11 @@ void updateEye(const uint32_t now) {
     if (eyeMode != EyeMode::Open &&
         now - lastControlAt >= CONTROL_TIMEOUT_MS) {
         eyeMode = EyeMode::Open;
-        eyes.setOpened(true);
+        applyRemoteEye(true);
+        return;
+    }
+
+    if (touchState != TouchState::Idle) {
         return;
     }
 
@@ -252,6 +344,8 @@ void setup(void) {
 
     eyes.begin();
     turnOffStatusLed();
+    Serial.printf("Touch panel: %s\n",
+                  M5.Touch.isEnabled() ? "enabled" : "disabled");
     if (!loadEyeId()) {
         stopWithError();
     }
@@ -274,5 +368,7 @@ void loop(void) {
                       eyes.toggleBatteryGauge() ? "on" : "off");
     }
 
-    updateEye(millis());
+    const uint32_t now = millis();
+    updateTouch(now);
+    updateEye(now);
 }
