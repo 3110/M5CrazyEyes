@@ -17,6 +17,8 @@ constexpr EyeId BTN_B_EYE_ID = EyeId::Right;
 constexpr uint32_t CONFIG_BUTTON_HOLD_MS = 1000;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 20;
 constexpr uint32_t EYE_ID_DISPLAY_MS = 1000;
+constexpr uint8_t EYE_ID_TEXT_SIZE = 5;
+constexpr uint8_t VERSION_TEXT_SIZE = 2;
 constexpr uint32_t FAST_BLINK_INTERVAL_MS = 100;
 constexpr uint32_t CONTROL_TIMEOUT_MS = 600;
 constexpr uint8_t TOUCH_BLINK_COUNT = 3;
@@ -89,7 +91,16 @@ void drawMessage(const char* line1, const char* line2, const uint8_t textSize) {
 }
 
 void showEyeId(const EyeId value) {
-    drawMessage(value == EyeId::Left ? "LEFT" : "RIGHT", nullptr, 5);
+    drawMessage(value == EyeId::Left ? "LEFT" : "RIGHT", nullptr,
+                EYE_ID_TEXT_SIZE);
+
+    char title[32];
+    snprintf(title, sizeof(title), "%s %s", CrazyEyes::NAME,
+             CrazyEyes::VERSION);
+    M5.Display.setTextSize(VERSION_TEXT_SIZE);
+    M5.Display.drawString(title, M5.Display.width() / 2,
+                          M5.Display.height() * 3 / 4);
+
     delay(EYE_ID_DISPLAY_MS);
 }
 
@@ -341,6 +352,9 @@ void onDataReceived(const uint8_t* addr, const uint8_t* data, int len) {
 void setup(void) {
     Serial.begin(115200);
     esp_log_level_set("*", static_cast<esp_log_level_t>(LOG_LOCAL_LEVEL));
+
+    Serial.println();
+    Serial.printf("%s %s\n", CrazyEyes::NAME, CrazyEyes::VERSION);
 
     eyes.begin();
     turnOffStatusLed();

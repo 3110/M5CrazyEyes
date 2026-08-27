@@ -4,6 +4,7 @@
 
 class CrazyEyes {
 public:
+    static constexpr const char* NAME = "M5CrazyEyes";
     static constexpr const char* VERSION = "v0.0.2";
 
     CrazyEyes(void);
