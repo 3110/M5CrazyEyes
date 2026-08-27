@@ -53,6 +53,9 @@ struct KeyState {
 // 両目を同時にまばたきさせる連続動作です。ランダムまばたきと応答パターンの
 // どちらもこれで表現します。
 struct BlinkSequence {
+    // ランダムまばたきなら true です。受信側が「活動あり」と数えないよう，
+    // 送信するコマンドに自動送信の印を付けます。
+    bool automatic = false;
     uint8_t remaining = 0;
     bool closed = false;
     uint32_t phaseAt = 0;
@@ -79,10 +82,13 @@ uint32_t randomBetween(const uint32_t min, const uint32_t max) {
     return min + esp_random() % (max - min + 1);
 }
 
-void broadcastCommand(const EyeId eyeId, const EyeCommand command) {
+void broadcastCommand(const EyeId eyeId, const EyeCommand command,
+                      const bool automatic = false) {
     const uint8_t packet[EYE_COMMAND_PACKET_SIZE] = {
         static_cast<uint8_t>(eyeId),
-        static_cast<uint8_t>(command),
+        static_cast<uint8_t>(
+            static_cast<uint8_t>(command) |
+            (automatic ? EYE_COMMAND_AUTO_FLAG : uint8_t{0})),
     };
     if (!espnow.broadcast(packet, sizeof(packet))) {
         ESP_LOGE("broadcastCommand",
@@ -91,12 +97,15 @@ void broadcastCommand(const EyeId eyeId, const EyeCommand command) {
     }
 }
 
+// ランダムまばたきは自動送信として印を付けます。応答パターンはキー操作への
+// 返事なので，手動の扱いのままにします。
 void broadcastBothEyes(const EyeCommand command) {
     if (!espnowReady) {
         return;
     }
-    broadcastCommand(KEY1_EYE_ID, command);
-    broadcastCommand(KEY2_EYE_ID, command);
+
+    broadcastCommand(KEY1_EYE_ID, command, sequence.automatic);
+    broadcastCommand(KEY2_EYE_ID, command, sequence.automatic);
 }
 
 void sendCommand(KeyState& state, const EyeId eyeId,
@@ -111,8 +120,10 @@ bool isAnyKeyPressed(void) {
     return key1.button.isPressed() || key2.button.isPressed();
 }
 
-void startBlinkSequence(const uint8_t count, const uint32_t closeMs,
-                        const uint32_t gapMs, const uint32_t now) {
+void startBlinkSequence(const bool automatic, const uint8_t count,
+                        const uint32_t closeMs, const uint32_t gapMs,
+                        const uint32_t now) {
+    sequence.automatic = automatic;
     sequence.remaining = count;
     sequence.closed = false;
     sequence.closeMs = closeMs;
@@ -183,7 +194,7 @@ void updateRandomBlink(const uint32_t now) {
 
     // 人はときどき2回続けて瞬きます。
     const uint8_t count = esp_random() % 100 < DOUBLE_BLINK_PERCENT ? 2 : 1;
-    startBlinkSequence(count,
+    startBlinkSequence(true, count,
                        randomBetween(RANDOM_BLINK_CLOSE_MIN_MS,
                                      RANDOM_BLINK_CLOSE_MAX_MS),
                        RANDOM_BLINK_GAP_MS, now);
@@ -228,10 +239,10 @@ void startPendingAck(const uint32_t now) {
     }
 
     if (pendingAck == Ack::On) {
-        startBlinkSequence(ACK_ON_BLINK_COUNT, ACK_ON_CLOSE_MS, ACK_ON_GAP_MS,
-                           now);
+        startBlinkSequence(false, ACK_ON_BLINK_COUNT, ACK_ON_CLOSE_MS,
+                           ACK_ON_GAP_MS, now);
     } else {
-        startBlinkSequence(1, ACK_OFF_CLOSE_MS, 0, now);
+        startBlinkSequence(false, 1, ACK_OFF_CLOSE_MS, 0, now);
     }
     pendingAck = Ack::None;
     lastKeyActivityAt = now;
