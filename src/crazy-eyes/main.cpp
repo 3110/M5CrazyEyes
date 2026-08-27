@@ -30,6 +30,7 @@ constexpr uint32_t CONTROL_TIMEOUT_MS = 600;
 constexpr uint8_t TOUCH_BLINK_COUNT = 3;
 constexpr uint32_t TOUCH_BLINK_CLOSE_MS = 80;
 constexpr uint32_t TOUCH_BLINK_OPEN_MS = 80;
+constexpr uint32_t TOUCH_REPEAT_MS = 200;
 constexpr uint32_t GAZE_UPDATE_MS = 20;
 // 画面の横方向に対応する重力成分がこの値で振り切れます。sin(30度)です。
 constexpr float GAZE_TILT_LIMIT = 0.5F;
@@ -47,6 +48,10 @@ constexpr uint32_t SLEEP_STEP_COUNT = CrazyEyes::OPEN_LEVEL_COUNT;
 // IMUのノイズをそのまま拾ってしまうためです。
 constexpr float MOTION_FILTER = 0.05F;
 constexpr float MOTION_THRESHOLD = 0.10F;
+// 自分の動きを反対の目へ知らせる間隔です。起きた瞬間だけ伝えるのでは足りま
+// せん。片方だけが振動を拾い続けている場合，その側には起床という遷移が起き
+// ないため，伝えるきっかけが無いまま反対側だけが眠ってしまいます。
+constexpr uint32_t ACTIVITY_SHARE_MS = 5000;
 
 enum class EyeMode : uint8_t {
     Open,
@@ -59,6 +64,9 @@ enum class EyeMode : uint8_t {
 enum class TouchState : uint8_t {
     Idle,
     Touching,
+    // 反対の目が触られています。こちらのタッチと同じ扱いにすることで，
+    // コントローラーからの指示に上書きされなくなります。
+    RemoteTouching,
     Blinking,
 };
 
@@ -69,13 +77,17 @@ EyeId eyeId = EyeId::Left;
 QueueHandle_t commandQueue = nullptr;
 EyeMode eyeMode = EyeMode::Open;
 uint32_t lastControlAt = 0;
+uint32_t lastManualAt = 0;
 uint32_t lastBlinkAt = 0;
 TouchState touchState = TouchState::Idle;
 uint8_t touchBlinkLeft = 0;
 bool touchBlinkClosed = false;
 uint32_t touchPhaseAt = 0;
 uint32_t touchPhaseMs = 0;
+uint32_t touchSentAt = 0;
+uint32_t remoteTouchAt = 0;
 uint32_t lastActivityAt = 0;
+uint32_t sharedActivityAt = 0;
 uint32_t sleepStep = 0;
 const char* lastActivitySource = "boot";
 bool hasMotionReference = false;
@@ -248,6 +260,33 @@ bool loadEyeId(void) {
 
 // タッチ中は遠隔側の描画を止めます。状態の更新とタイムアウトの判定は続ける
 // ため，指を離したときに正しい状態へ戻せます。
+// タッチと本体の動きは片方にしか届きません。反対の目へも伝えて左右を揃えます。
+void sendToOtherEye(const EyeCommand command) {
+    const uint8_t packet[EYE_COMMAND_PACKET_SIZE] = {
+        static_cast<uint8_t>(eyeId == EyeId::Left ? EyeId::Right : EyeId::Left),
+        static_cast<uint8_t>(command),
+    };
+    espnow.broadcast(packet, sizeof(packet));
+}
+
+// 目の状態は変えずに，起きていることだけを反対の目へ伝えます。開くコマンド
+// を使うと，コントローラーがキーで閉じている最中に一瞬開いてしまいます。
+void shareActivity(const uint32_t now) {
+    if (now - sharedActivityAt < ACTIVITY_SHARE_MS) {
+        return;
+    }
+    sharedActivityAt = now;
+    sendToOtherEye(EyeCommand::Awake);
+}
+
+void startTouchBlink(const uint32_t now) {
+    touchState = TouchState::Blinking;
+    touchBlinkLeft = TOUCH_BLINK_COUNT;
+    touchBlinkClosed = false;
+    touchPhaseAt = now;
+    touchPhaseMs = 0;
+}
+
 // 何か起きたら，一段ずつ戻すのではなく即座に見開きます。
 void markActivity(const uint32_t now, const char* source) {
     lastActivityAt = now;
@@ -299,11 +338,43 @@ void restoreRemoteEye(const uint32_t now) {
 }
 
 void applyCommand(const uint8_t raw, const uint32_t now) {
+    const EyeCommand command = toEyeCommand(raw);
+
     if (!isAutomaticEyeCommand(raw)) {
         markActivity(now, "command");
+        // 「起きている」は目の状態を変えないので，優先順位には関わりません。
+        if (command != EyeCommand::Awake) {
+            lastManualAt = now;
+        }
+    } else if (now - lastManualAt < CONTROL_TIMEOUT_MS) {
+        // 手動操作を優先します。これがないと，反対の目がタッチされて閉じて
+        // いる最中に，コントローラーのランダムまばたきが割り込んで目を開けて
+        // しまいます。
+        return;
     }
 
-    switch (toEyeCommand(raw)) {
+    switch (command) {
+        case EyeCommand::Awake:
+            // 反対の目が動いています。冒頭で活動を記録済みです。
+            break;
+
+        case EyeCommand::Touch:
+            // 自分が触られている場合は，そちらを優先します。
+            remoteTouchAt = now;
+            if (touchState != TouchState::Touching) {
+                touchState = TouchState::RemoteTouching;
+                eyes.setOpened(false);
+            }
+            break;
+
+        case EyeCommand::Blink:
+            // 反対の目がタッチされました。一緒にまばたきします。
+            eyeMode = EyeMode::Open;
+            if (touchState != TouchState::Touching) {
+                startTouchBlink(now);
+            }
+            break;
+
         case EyeCommand::Open:
             eyeMode = EyeMode::Open;
             applyRemoteEye(true);
@@ -388,6 +459,7 @@ void updateGaze(const uint32_t now) {
     refAz += (az - refAz) * MOTION_FILTER;
     if (motion > MOTION_THRESHOLD) {
         markActivity(now, "motion");
+        shareActivity(now);
     }
 
 #if CRAZY_EYES_GAZE_DEBUG
@@ -443,16 +515,30 @@ void updateTouch(const uint32_t now) {
         if (touchState != TouchState::Touching) {
             touchState = TouchState::Touching;
             eyes.setOpened(false);
+            sendToOtherEye(EyeCommand::Touch);
+            touchSentAt = now;
+        } else if (now - touchSentAt >= TOUCH_REPEAT_MS) {
+            // 押し続けている間，反対の目がタイムアウトで抜けないように送り
+            // 続けます。
+            sendToOtherEye(EyeCommand::Touch);
+            touchSentAt = now;
         }
         return;
     }
 
     if (touchState == TouchState::Touching) {
-        touchState = TouchState::Blinking;
-        touchBlinkLeft = TOUCH_BLINK_COUNT;
-        touchBlinkClosed = false;
-        touchPhaseAt = now;
-        touchPhaseMs = 0;
+        sendToOtherEye(EyeCommand::Blink);
+        startTouchBlink(now);
+        return;
+    }
+
+    // 触っている側が落ちたり通信が切れたりしても，こちらが固まらないように
+    // します。
+    if (touchState == TouchState::RemoteTouching) {
+        if (now - remoteTouchAt >= CONTROL_TIMEOUT_MS) {
+            touchState = TouchState::Idle;
+            restoreRemoteEye(now);
+        }
         return;
     }
 
@@ -526,6 +612,10 @@ void setup(void) {
         stopWithError();
     }
 
+    // 後から起動した側は必ず起きた状態です。先に動いていた側の眠さが進んで
+    // いると左右がずれるので，起こしに行きます。
+    sendToOtherEye(EyeCommand::Awake);
+
     eyes.show();
 }
 
@@ -535,6 +625,7 @@ void loop(void) {
     const uint32_t now = millis();
     if (M5.BtnA.wasClicked()) {
         markActivity(now, "button");
+        shareActivity(now);
         Serial.printf("Battery gauge: %s\n",
                       eyes.toggleBatteryGauge() ? "on" : "off");
     }
