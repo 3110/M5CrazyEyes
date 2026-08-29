@@ -4,7 +4,7 @@ M5Stack Stopwatch の画面に目の画像を表示し，ESP-NOW で受信した
 
 | 開いた状態 | 閉じた状態 |
 | --- | --- |
-| ![開いた目](data/crazy_eyes_open.jpg) | ![閉じた目](data/crazy_eyes_close.jpg) |
+| ![開いた目](design/crazy-eyes-open.svg) | ![閉じた目](design/crazy-eyes-close.svg) |
 
 ## 動作仕様
 
